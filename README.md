@@ -64,6 +64,8 @@ state); `success` is a registered, self-holding bit.
 
 ![Chip layout](assets/layout.png)
 
+*The extracted chip layout (SkyWater 130 nm): 728 standard cells, 12,615 merged metal polygons, 33,323 vias.*
+
 An interactive 3D viewer of the placed cells is in the repository as
 `3d-viewer.html` (all 728 cells at their real placed coordinates from the
 KLayout LVS extraction, with a playable animation of the key streaming
@@ -85,6 +87,17 @@ puzzle.gds ──► extract.py ──► puzzle_extracted.v / .json
                                           │
                                           ▼
                                    run_protocol.py ──► success + flag
+```
+
+```mermaid
+flowchart LR
+    A[puzzle.gds<br/>SkyWater 130 nm layout] --> B[extract.py<br/>GDS to netlist]
+    B --> C[puzzle_extracted.v / .json<br/>728 cells, 741 nets]
+    C --> D[simulate.py<br/>cycle simulator]
+    D --> E[verify_vcd.py<br/>312/312 VCD edges match]
+    C --> F[solve_z3.py<br/>141-cycle unroll]
+    F --> G[121-bit key<br/>uniqueness: blocking clause to UNSAT]
+    G --> H[run_protocol.py<br/>success + flag (* TWO STARS *)]
 ```
 
 1. **GDS parse and polygon union** (`extract.py`): DSU + spatial hash
