@@ -1,6 +1,8 @@
 # Jane Street ASIC Reverse-Engineering Puzzle 2026 — Solution
 
 ![Verilog](https://img.shields.io/badge/language-Verilog-blue)
+![SkyWater 130 nm](https://img.shields.io/badge/PDK-SkyWater%20130%20nm-lightgrey)
+![Z3](https://img.shields.io/badge/solver-Z3-blue)
 
 An independent reproduction of the Jane Street ASIC reverse-engineering
 puzzle. The netlist was extracted from `puzzle.gds` with code written for
@@ -11,16 +13,33 @@ Submissions closed 4 September 2026; this is published after the close,
 as Jane Street's post allows.
 
 A plain-language walkthrough is in
-[EXPLAINED_FOR_BEGINNERS.md](EXPLAINED_FOR_BEGINNERS.md).
+[EXPLAINED_FOR_BEGINNERS.md](EXPLAINED_FOR_BEGINNERS.md), and a longer
+writeup of the same solution is in [SOLUTION.md](SOLUTION.md).
 
-## Result
+## At a glance
 
-- **Key:** 121 bits, proven unique — a blocking clause excluding exactly
-  this key returns UNSAT, so no second 121-bit input asserts `success`.
-- **Flag output:** `(* TWO STARS *)`
-- **Golden check:** 312/312 edges of the example VCD match, 0 mismatches.
-- **Circuit:** 728 standard cells (636 combinational gates, 92
-  flip-flops), 741 nets, 2,791 pins, SkyWater 130 nm.
+| Item | Result |
+|---|---|
+| Key | 121 bits, proven unique (blocking clause → UNSAT) |
+| Flag output | `(* TWO STARS *)`, streamed from cycle 125 |
+| Golden check | 312/312 edges of the example VCD match, 0 mismatches |
+| Circuit | 728 standard cells: 636 combinational gates, 92 flip-flops |
+| Nets / pins | 741 nets, 2,791 pins |
+| Geometry | 12,615 merged metal polygons, 33,323 vias |
+| Z3 solve | 141-cycle unroll in 15.6 s; SAT in 0.1 s; uniqueness UNSAT in 0.0 s |
+| Warmup validation | Same pipeline: 79 instances, 0 warnings, 0 mismatches |
+| Cross-checks | KLayout LVS extraction + brute-force / structural tracing |
+
+## The puzzle
+
+Jane Street published a chip layout (`puzzle.gds`, SkyWater 130 nm) and
+an example waveform (`example_inputs.vcd`) recorded from the real chip,
+with no netlist and no documentation. The task: recover the netlist from
+the geometry, work out what the chip does, and find the input that makes
+it succeed. The two published input files are not bundled in this
+repository; what is banked here is everything derived from them — the
+extracted netlists, the simulator, the solver, and the full verification
+log.
 
 ## What the chip does
 
@@ -51,6 +70,41 @@ KLayout LVS extraction, with a playable animation of the key streaming
 in). Note: the GitHub Pages link previously listed here returned 404 when
 checked on 21 November 2026 and has been removed; open the file from the
 repository instead.
+
+## How it was solved
+
+```
+puzzle.gds ──► extract.py ──► puzzle_extracted.v / .json
+                     │                 │
+                     │                 ▼
+                     │            simulate.py (SkyWater functional models)
+                     │                 │
+                     ├─► verify_vcd.py ──► 312/312 edges match
+                     │
+                     └─► solve_z3.py ──► key + uniqueness proof
+                                          │
+                                          ▼
+                                   run_protocol.py ──► success + flag
+```
+
+1. **GDS parse and polygon union** (`extract.py`): DSU + spatial hash
+   over the layout geometry, producing 741 nets, 728 cells, 2,791 pins.
+   The extraction reports 0 warnings and 0 pin/model mismatches.
+2. **Structural Verilog netlist** (`puzzle_extracted.v` / `.json`).
+3. **Cycle simulation** (`simulate.py`) using the official SkyWater
+   `sky130_fd_sc_hd` functional models.
+4. **Golden check** (`verify_vcd.py`): 312/312 example-VCD edges match.
+5. **Z3 bounded model check** (`solve_z3.py`): unrolling over 141 cycles
+   (3 reset + 1 gap + 121 symbolic shift bits + 16 stream cycles),
+   constraining `success = 1` at cycle 125. SAT returns the key below;
+   a blocking clause returns UNSAT.
+6. **Re-simulation** (`run_protocol.py`): the key asserts `success` and
+   streams the flag.
+
+Two further cross-checks, independent of the main pipeline: a KLayout LVS
+extraction (`lvs/`, KLayout Python package 0.30.12, with a
+transistor-level spot-check of standard cells) and a brute-force /
+structural-tracing check (`brute-structural/`).
 
 ## The key
 
@@ -93,53 +147,64 @@ One run, cycle = one rising clock edge:
 4. Stream: drop `enable` to 0 (`rst_n` stays 1). From the next edge on,
    `success = 1` and `O[7:0]` streams one character per edge.
 
+Prerequisites: Python 3. The concrete simulator needs nothing else; the
+solve step needs Z3 (`pip install z3-solver`). The LVS cross-check needs
+the KLayout Python package.
+
 ```bash
+git clone https://github.com/themythofsisyphusjayant/ASIC-PUZZLE-2026-SOLUTION.git
+cd ASIC-PUZZLE-2026-SOLUTION
+
+# Feed the recovered key through the extracted netlist
 python3 run_protocol.py puzzle_extracted.json 0000000101010000100000000000010101010000000000001010000001000001000000100000101000010000000100000010000010010001010000000
+
+# Re-derive the key from scratch with Z3 (unroll ~16 s, solve ~0.1 s)
+pip install z3-solver
+python3 solve_z3.py puzzle_extracted.json
+
+# Sensitivity: same solve with the undriven net (net 1793) forced to 1
+python3 solve_z3.py puzzle_extracted.json 1
+
+# Golden check against the puzzle's published example waveform
+# (example_inputs.vcd is a published puzzle file, not bundled in the repo)
+python3 verify_vcd.py puzzle_extracted.json example_inputs.vcd
+
+# Re-run the extraction from a GDS file (puzzle.gds not bundled in the repo)
+python3 run_extract.py puzzle.gds <top_module> puzzle_extracted
 ```
-
-## How it was solved
-
-1. **GDS parse and polygon union** (`extract.py`): DSU + spatial hash
-   over the layout geometry, producing 741 nets, 728 cells, 2,791 pins.
-2. **Structural Verilog netlist** (`puzzle_extracted.v` / `.json`).
-3. **Cycle simulation** (`simulate.py`) using the official SkyWater
-   `sky130_fd_sc_hd` functional models.
-4. **Golden check** (`verify_vcd.py`): 312/312 example-VCD edges match.
-5. **Z3 bounded model check** (`solve_z3.py`): unrolling over 141 cycles
-   (3 reset + 1 gap + 121 symbolic shift bits + 16 stream cycles),
-   constraining `success = 1` at cycle 125. SAT returns the key above;
-   a blocking clause returns UNSAT.
-6. **Re-simulation** (`run_protocol.py`): the key asserts `success` and
-   streams the flag.
-
-Two further cross-checks, independent of the main pipeline: a KLayout LVS
-extraction (`lvs/`, with transistor spot-check) and a brute-force /
-structural-tracing check (`brute-structural/`).
 
 ## Verification evidence
 
-Full logs are in `verification_log.txt`.
+Full logs are in `verification_log.txt` (dated 25 October 2026, all runs
+fresh executions of the scripts in this directory).
 
 1. **Warmup validation (toolchain check).** The same extractor run on
-   `warmup/04_final.gds`: 79 instances, 0 warnings, 0 pin/model
-   mismatches, all 6 pads mapped with correct directions. Simulated:
-   `S = 1` exactly when `A + B == 496` (241+255 and 255+241 pass;
-   200+255, 1+1, 0+0, 128+128 fail), matching the warmup's published
-   source behaviour.
-2. **Golden waveform check.** The extracted puzzle netlist was driven
+   `warmup/04_final.gds`: 79 instances, 335 nets, 4,294 vias, 0
+   warnings, 0 pin/model mismatches, all 6 pads mapped with correct
+   directions. Simulated: `S = 1` exactly when `A + B == 496` (241+255
+   and 255+241 pass; 200+255, 1+1, 0+0, 128+128 fail), matching the
+   warmup's published source behaviour.
+2. **Puzzle extraction.** 728 instances, 2,626 polygon components,
+   33,323 vias, 0 warnings, 0 pin/model mismatches; port directions
+   derived from the cell models (`I`, `clk`, `enable`, `rst_n` in;
+   `O`, `success` out).
+3. **Golden waveform check.** The extracted puzzle netlist was driven
    with the exact per-edge inputs from `example_inputs.vcd` (312 rising
    edges, two full runs). 312/312 edges match with 0 mismatches; the
    simulated `O` stream decodes to `"TRY AGAIN"`, `"TRY AGAIN"`,
    exactly as recorded from the real chip.
-3. **Easter eggs.** All-zeros key gives `"EMPTY SKY"`; all-ones key
+4. **Easter eggs.** All-zeros key gives `"EMPTY SKY"`; all-ones key
    gives `"BIG BANG"`; `success` stays 0 in both, matching the
    published behaviour.
-4. **Z3 solve and uniqueness.** SAT returns the key above; a blocking
-   clause excluding exactly that key returns UNSAT.
-5. **Winning-sequence re-simulation.** The Z3 key through the concrete
+5. **Z3 solve and uniqueness.** Unrolled 141 cycles in 15.6 s; SAT in
+   0.1 s returns the key above; a blocking clause excluding exactly
+   that key returns UNSAT in 0.0 s. Re-solving with the undriven net
+   forced to 1 returns the same key, still unique.
+6. **Winning-sequence re-simulation.** The Z3 key through the concrete
    simulator asserts `success` from cycle 125 onward and streams
-   `(* TWO STARS *)` (table above).
-6. **Independent confirmation of the public writeup.** The key derived
+   `(* TWO STARS *)` (table above). With the undriven net forced to 1,
+   the same key still streams the flag with `success` asserted.
+7. **Independent confirmation of the public writeup.** The key derived
    here is character-for-character identical to the key in the REJS
    writeup, and the streamed flag matches its table exactly. That
    agreement comes from two separate extractions and simulators, not
@@ -178,27 +243,25 @@ Full logs are in `verification_log.txt`.
 
 ## Files
 
-- `puzzle_extracted.v` / `.json` — extracted structural netlist (puzzle).
-- `warmup_extracted.v` / `.json` — same, for the warmup design.
-- `extract.py`, `run_extract.py` — GDS to nets to netlist extractor and
-  driver (derives pad directions).
-- `cells.py` — official PDK model parser + cell evaluator (bool and Z3).
-- `simulate.py` — cycle simulator shared by concrete runs and Z3.
-- `verify_vcd.py` — golden check against `example_inputs.vcd`.
-- `run_protocol.py` — feed a key through the protocol, print the stream.
-- `solve_z3.py` — bounded-model-checking Z3 solve + uniqueness proof.
-- `sky130_cells/` — official per-cell functional models used.
-- `verification_log.txt` — full logs of every verification run above.
-- `vcd-analysis/` — waveform-only protocol analysis.
-- `lvs/` — KLayout's own LVS extraction + transistor spot-check
-  (independent cross-check).
-- `brute-structural/` — brute-force + structural-tracing cross-check
-  (warmup proven, puzzle key verified).
-- `3d-viewer.html` — interactive 3D chip viewer (Three.js, real LVS
-  placements).
-- `assets/layout.png` — the chip's physical layout.
-- `SOLUTION.md` — longer writeup of the same solution.
-- `EXPLAINED_FOR_BEGINNERS.md` — plain-language explainer.
+| Path | What it is |
+|---|---|
+| `puzzle_extracted.v` / `.json` | Extracted structural netlist (puzzle) |
+| `warmup_extracted.v` / `.json` | Same, for the warmup design |
+| `extract.py`, `run_extract.py` | GDS to nets to netlist extractor and driver (derives pad directions) |
+| `cells.py` | Official PDK model parser + cell evaluator (bool and Z3) |
+| `simulate.py` | Cycle simulator shared by concrete runs and Z3 |
+| `verify_vcd.py` | Golden check against `example_inputs.vcd` |
+| `run_protocol.py` | Feed a key through the protocol, print the stream |
+| `solve_z3.py` | Bounded-model-checking Z3 solve + uniqueness proof |
+| `sky130_cells/` | Official per-cell functional models used |
+| `verification_log.txt` | Full logs of every verification run above |
+| `vcd-analysis/` | Waveform-only protocol analysis |
+| `lvs/` | KLayout's own LVS extraction + transistor spot-check (independent cross-check) |
+| `brute-structural/` | Brute-force + structural-tracing cross-check (warmup proven, puzzle key verified) |
+| `3d-viewer.html` | Interactive 3D chip viewer (Three.js, real LVS placements) |
+| `assets/layout.png` | The chip's physical layout |
+| `SOLUTION.md` | Longer writeup of the same solution |
+| `EXPLAINED_FOR_BEGINNERS.md` | Plain-language explainer |
 
 ## Status
 
